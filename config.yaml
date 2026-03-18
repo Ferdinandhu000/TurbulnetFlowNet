@@ -1,0 +1,69 @@
+dataset:
+  init_sensor_timeframes: [0, 3, 6, 9, 12]
+  future_prediction_range: null     # For random future prediction: predicts a frame in [max(sensors) + range[0], max(sensors) + range[1]]
+  n_fullstate_timeframes_per_chunk: 1   # not for FNO3D
+  n_samplings_per_chunk: 1
+  resolution: [48, 128]
+  n_sensors: 128
+  sensor_generator: 'LHS'  # AroundCylinder | LHS
+  embedding_generator: 'Voronoi'  # Voronoi | Mask | Vector
+  dropout_probabilities: [0.05, 0.04, 0.03, 0.02, 0.01]   # [] for no dropout
+  seed: 1
+
+architecture:
+  momdel_name: 'flronet-fno'  # flronet-fno | flronet-unet | flronet-mlp | fno3d | transolver
+  # General configs:
+  n_channels: 1   # fixed for 1d problems (e.g. 1-channel 48x128)
+  embedding_dim: 64
+  # FLRONet-FNO & FNO3D -specific configs:
+  n_fno_layers: 4
+  n_hmodes: 24
+  n_wmodes: 48
+  # FNO3D -specific configs:
+  n_tmodes: 2
+  # Transolver-specific configs:
+  n_trans_layers: 4
+  n_trans_hidden: 128
+  n_trans_head: 8
+  slice_num: 32
+  trans_dropout: 0.0
+  # FLRONet-specific configs:
+  n_stacked_networks: 2
+
+training:
+  from_checkpoint: null # set to null to train from scratch
+  train_batch_size: 2
+  val_batch_size: 2
+  learning_rate: 1e-4
+  n_epochs: 10
+  patience: 5
+  tolerance: 0.
+  save_frequency: 1
+  # FLRONet-specific configs:
+  freeze_branchnets: false
+  freeze_trunknets: false
+  freeze_bias: false
+
+evaluate:
+  # from_checkpoint: 'best_fno3d/fno3d9.pt'
+  from_checkpoint: '.checkpoints\flronetfno1.pt'
+  # from_checkpoint: 'best_flronetmlp/flronetmlp12.pt'
+  # from_checkpoint: 'best_flronetunet/flronetunet16.pt'
+  n_dropout_sensors: 0
+  noise_level: 0
+  init_fullstate_timeframes: [10] # FLRONet-specific, set to null to randomly generate the fullstate frames with the same random seed at training 
+
+inference:
+  # from_checkpoint: '.checkpoints_AFNO/afnonet3.pt'
+  from_checkpoint: '.checkpoints_patch4\afnonet2.pt'
+  case_dir: 'data/test/case0041'
+  sensor_timeframes: [165, 170, 175, 180, 185]
+  reconstruction_timeframes: [177.5]  # not for FNO3D
+  sensor_position_path: 'tensors/test/sensor_positions/pos.pt'
+  n_dropout_sensors: 0
+  noise_level: 
+  out_resolution: [140, 240]
+  # out_resolution: [280, 480]
+  # out_resolution: [560, 960]
+  # out_resolution: [1120, 1920]
+

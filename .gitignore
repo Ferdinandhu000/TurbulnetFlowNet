@@ -1,0 +1,10 @@
+.checkpoints*/
+plots*/
+data/
+tensors/
+.vscode/
+.logs/
+
+*.pt
+__pycache__/
+*.pyc
