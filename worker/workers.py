@@ -13,7 +13,7 @@ from torch.optim import Adam
 from common.training import Accumulator, EarlyStopping, Timer, Logger, CheckpointSaver
 from cfd.dataset import CFDDataset, DatasetMixin
 from cfd.embedding import Voronoi, Mask, Vector
-from model import FLRONetFNO, FLRONetUNet, FLRONetMLP, FNO3D, FLRONetTransolver
+from model import FLRONetFNO, FLRONetUNet, FLRONetMLP, FNO3D, FLRONetTransolver, FNO
 from common.plotting import plot_frame
 from common.functional import compute_velocity_field
 
@@ -57,14 +57,14 @@ class Trainer(Worker):
 
     def __init__(
         self, 
-        net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver,
+        net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver | FNO,
         lr: float,
         train_dataset: CFDDataset,
         val_dataset: CFDDataset,
         train_batch_size: int,
         val_batch_size: int,
     ):
-        self.net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver = net
+        self.net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver | FNO = net
         self.lr: float = lr
         self.train_dataset: CFDDataset = train_dataset
         self.val_dataset: CFDDataset = val_dataset
@@ -101,7 +101,7 @@ class Trainer(Worker):
         logger = Logger()
         checkpoint_saver = CheckpointSaver(model=self.net, dirpath=checkpoint_path)
         
-        if isinstance(self.net, (FLRONetFNO, FLRONetUNet, FLRONetMLP, FLRONetTransolver)):
+        if isinstance(self.net, (FLRONetFNO, FLRONetUNet, FLRONetMLP, FLRONetTransolver, FNO)):
             self.model_name = self.net.__class__.__name__.lower()
         else:
             self.model_name = 'fno3d'
@@ -118,7 +118,7 @@ class Trainer(Worker):
                 self._validate_inputs(sensor_timeframes, sensor_frames, fullstate_timeframes, fullstate_frames)
                 self.optimizer.zero_grad()
                 
-                if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver)):
+                if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver, FNO)):
                     # Forward propagation
                     reconstruction_frames: torch.Tensor = self.net(
                         sensor_timeframes=sensor_timeframes,
@@ -180,7 +180,7 @@ class Trainer(Worker):
                 # Data validation
                 self._validate_inputs(sensor_timeframes, sensor_frames, fullstate_timeframes, fullstate_frames)
                 # Forward propagation
-                if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver)):
+                if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver, FNO)):
                     reconstruction_frames: torch.Tensor = self.net(
                         sensor_timeframes=sensor_timeframes,
                         sensor_values=sensor_frames,
@@ -202,12 +202,12 @@ class Trainer(Worker):
 
 class Predictor(Worker, DatasetMixin):
 
-    def __init__(self, net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver):
-        self.net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver = net.cuda()
+    def __init__(self, net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver | FNO):
+        self.net: FLRONetFNO | FLRONetUNet | FLRONetMLP | FNO3D | FLRONetTransolver | FNO = net.cuda()
         self.rmse = nn.MSELoss(reduction='sum')
         self.mae = nn.L1Loss(reduction='sum')
         
-        if isinstance(self.net, (FLRONetFNO, FLRONetUNet, FLRONetMLP, FLRONetTransolver)):
+        if isinstance(self.net, (FLRONetFNO, FLRONetUNet, FLRONetMLP, FLRONetTransolver, FNO)):
             self.model_name = self.net.__class__.__name__.lower()
         else:
             self.model_name = 'fno3d'
@@ -293,7 +293,7 @@ class Predictor(Worker, DatasetMixin):
         self.net.eval()
         with torch.no_grad():
             # reconstruct
-            if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver)):
+            if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver, FNO)):
                 reconstruction_frames: torch.Tensor = self.net(
                     sensor_timeframes=sensor_timeframes,
                     sensor_values=sensor_frames,
@@ -356,7 +356,7 @@ class Predictor(Worker, DatasetMixin):
                 # Data validation
                 self._validate_inputs(sensor_timeframes, sensor_frames, fullstate_timeframes, fullstate_frames)
                 # Forward propagation
-                if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver)):
+                if isinstance(self.net, (FLRONetFNO, FLRONetMLP, FLRONetUNet, FLRONetTransolver, FNO)):
                     reconstruction_frames: torch.Tensor = self.net(
                         sensor_timeframes=sensor_timeframes,
                         sensor_values=sensor_frames,

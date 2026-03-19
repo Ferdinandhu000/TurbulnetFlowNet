@@ -2,7 +2,7 @@ import argparse
 from typing import List, Dict, Any, Optional
 import yaml
 
-from model import FLRONetFNO, FLRONetUNet, FLRONetMLP, FNO3D, FLRONetTransolver
+from model import FLRONetFNO, FLRONetUNet, FLRONetMLP, FNO3D, FLRONetTransolver, FNO
 from cfd.dataset import CFDDataset
 from common.training import CheckpointLoader
 from worker import Trainer
@@ -145,6 +145,19 @@ def main(config: Dict[str, Any]) -> None:
                 resolution=resolution,
                 slice_num=slice_num,
                 dropout=trans_dropout
+            ).cuda()
+
+    elif model_name.lower() == 'fno':
+        # Model
+        if from_checkpoint is not None:
+            checkpoint_loader = CheckpointLoader(checkpoint_path=from_checkpoint)
+            net: FNO = checkpoint_loader.load(scope=globals()).cuda()
+            assert isinstance(net, FNO)
+        else:
+            net = FNO(
+                n_channels=n_channels, n_fno_layers=n_fno_layers, 
+                n_hmodes=n_hmodes, n_wmodes=n_wmodes, embedding_dim=embedding_dim,
+                n_timeframes=len(init_sensor_timeframes),
             ).cuda()
 
     elif model_name.lower() == 'fno3d':

@@ -35,8 +35,8 @@ class SpectralConv2d(nn.Module):
         padded_input: torch.Tensor = F.pad(input=input, pad=(0, padded_W - W, 0, padded_H - H), mode='constant', value=0)
         # FFT
         fourier_coeff: torch.Tensor = torch.fft.rfft2(padded_input, dim=(2, 3), norm="ortho")
-        output_real = torch.zeros((n_frames, embedding_dim, H, W), device='cuda')
-        output_imag = torch.zeros((n_frames, embedding_dim, H, W), device='cuda')
+        output_real = torch.zeros((n_frames, embedding_dim, H, W), device=input.device)
+        output_imag = torch.zeros((n_frames, embedding_dim, H, W), device=input.device)
 
         pos_freq_slice: Tuple[slice, slice, slice, slice] = (
             slice(None), slice(None), slice(None, self.n_hmodes), slice(None, self.n_wmodes)
@@ -488,17 +488,16 @@ class SinusoidEmbedding(nn.Module):
         self.embedding_dim: int = embedding_dim
 
         # Frequency scaling
-        self.w = 1. / torch.pow(
-            input=torch.tensor(10_000., dtype=torch.float, device='cuda'),
-            exponent=torch.arange(0, embedding_dim, 2, dtype=torch.float, device='cuda') / embedding_dim,
-        )
-        assert self.w.shape == (embedding_dim // 2,)
+        self.register_buffer('w', 1. / torch.pow(
+            input=torch.tensor(10_000., dtype=torch.float),
+            exponent=torch.arange(0, embedding_dim, 2, dtype=torch.float) / embedding_dim,
+        ))
 
     def forward(self, timeframes: torch.Tensor) -> torch.Tensor:
         assert timeframes.ndim == 2
         batch_size, n_timeframes = timeframes.shape
         timeframes = timeframes.unsqueeze(-1)  # (batch_size, n_timeframes, 1)
-        sinusoid = torch.zeros(*timeframes.shape[:-1], self.embedding_dim, device='cuda')
+        sinusoid = torch.zeros(*timeframes.shape[:-1], self.embedding_dim, device=timeframes.device)
         sinusoid[:, :, 0::2] = torch.sin(timeframes * self.w)
         sinusoid[:, :, 1::2] = torch.cos(timeframes * self.w)
         assert sinusoid.shape == (batch_size, n_timeframes, self.embedding_dim)
@@ -703,3 +702,115 @@ class FLRONetTransolver(_BaseFLRONet):
                 for _ in range(n_stacked_networks)
             ]
         )
+
+class FNO(nn.Module):
+    def __init__(
+        self,
+        n_channels: int, n_fno_layers: int, n_hmodes: int, n_wmodes: int, 
+        embedding_dim: int, n_timeframes: int = 5,
+    ):
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_fno_layers = n_fno_layers
+        self.n_hmodes = n_hmodes
+        self.n_wmodes = n_wmodes
+        self.embedding_dim = embedding_dim
+        self.n_timeframes = n_timeframes
+
+        in_chans_total = n_channels
+
+        self.embedding_layer = nn.Sequential(
+            nn.Linear(in_features=in_chans_total, out_features=128),
+            nn.GELU(),
+            nn.Linear(in_features=128, out_features=256),
+            nn.GELU(),
+            nn.Linear(in_features=256, out_features=embedding_dim),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(in_features=embedding_dim, out_features=128),
+            nn.GELU(),
+            nn.Linear(in_features=128, out_features=128),
+            nn.GELU(),
+            nn.Linear(in_features=128, out_features=in_chans_total),
+        ) 
+        self.spectral_conv_layers = nn.ModuleList(
+            modules=[SpectralConv2d(embedding_dim=embedding_dim, n_hmodes=n_hmodes, n_wmodes=n_wmodes) for _ in range(n_fno_layers)]
+        )
+        self.Ws = nn.ModuleList([
+            nn.Conv2d(in_channels=embedding_dim, out_channels=embedding_dim, kernel_size=1)
+            for _ in range(n_fno_layers)
+        ])
+
+    def forward(
+        self,
+        sensor_timeframes: torch.Tensor,
+        sensor_values: torch.Tensor,
+        fullstate_timeframes: torch.Tensor,
+        out_resolution: Tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        # sensor_values: (B, T_in, C, H, W)
+        batch_size, n_sensor_timeframes, n_channels, in_H, in_W = sensor_values.shape
+        assert n_sensor_timeframes == self.n_timeframes
+        assert n_channels == self.n_channels
+        
+        # Merge B and T
+        x = sensor_values.reshape(batch_size * n_sensor_timeframes, n_channels, in_H, in_W) # (B*T_in, C, H, W)
+        
+        # Encoder
+        x = self.embedding_layer(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) # (B*T_in, embedding_dim, H, W)
+        
+        # Spectral layers
+        for i in range(self.n_fno_layers):
+            x1 = self.spectral_conv_layers[i](x)
+            x2 = self.Ws[i](x)
+            x = x1 + x2
+            if i < self.n_fno_layers - 1:
+                x = F.gelu(x)
+        
+        # Decoder
+        x = self.decoder(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) # (B*T_in, C, H, W)
+        
+        # Reshape back to (B, T_in, C, H, W)
+        reconstructed_frames = x.reshape(batch_size, n_sensor_timeframes, n_channels, in_H, in_W)
+
+        # Interpolate if output resolution is different
+        if out_resolution is not None and out_resolution != (in_H, in_W):
+            reconstructed_frames = F.interpolate(
+                input=reconstructed_frames.flatten(0, 1), 
+                size=out_resolution, 
+                mode='bilinear', 
+                align_corners=False
+            ).reshape(batch_size, n_sensor_timeframes, n_channels, *out_resolution)
+            out_H, out_W = out_resolution
+        else:
+            out_H, out_W = in_H, in_W
+
+        # Target Frame Interpolation
+        n_fullstate_timeframes = fullstate_timeframes.shape[1]
+        output = torch.zeros(
+            batch_size, n_fullstate_timeframes, n_channels, out_H, out_W, 
+            device=sensor_values.device
+        )
+        
+        # sensor_timeframes: (B, T_in)
+        # fullstate_timeframes: (B, T_out)
+        for b in range(batch_size):
+            times = sensor_timeframes[b]
+            for t_idx in range(n_fullstate_timeframes):
+                target_t = fullstate_timeframes[b, t_idx]
+                
+                # Find adjacent sensor frames
+                idx = torch.searchsorted(times, target_t)
+                
+                if idx == 0:
+                    output[b, t_idx] = reconstructed_frames[b, 0]
+                elif idx == len(times):
+                    output[b, t_idx] = reconstructed_frames[b, -1]
+                else:
+                    t_prev = times[idx-1]
+                    t_next = times[idx]
+                    weight_next = (target_t - t_prev) / (t_next - t_prev)
+                    weight_prev = 1.0 - weight_next
+                    output[b, t_idx] = weight_prev * reconstructed_frames[b, idx-1] + weight_next * reconstructed_frames[b, idx]
+        
+        return output
