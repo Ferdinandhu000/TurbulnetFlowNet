@@ -11,7 +11,7 @@ dataset:
   seed: 1
 
 architecture:
-  momdel_name: 'fno'  # flronet-fno | flronet-unet | flronet-mlp | fno3d | transolver | fno
+  momdel_name: 'fno'  # flronet-fno | flronet-unet | flronet-mlp | flronet-transolver | fno3d | fno | afno | transolver
   # General configs:
   n_channels: 1   # fixed for 1d problems (e.g. 1-channel 48x128)
   embedding_dim: 64

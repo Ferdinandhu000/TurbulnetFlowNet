@@ -84,7 +84,7 @@ class SpectralConv2d(nn.Module):
 
 
 ###
-class AFNO(nn.Module):
+class AFNOLayer(nn.Module):
     def __init__(self, embedding_dim, img_size=(48, 128), patch_size=(8, 8)):
         super().__init__()
         self.hidden_size = embedding_dim
@@ -219,7 +219,7 @@ class FNOBranchNet(nn.Module):
             self.de_patch_embed = DePatchEmbed(img_size=resolution, patch_size=patch_size, out_chans=in_chans_total, embed_dim=768)
 
             self.spectral_conv_layers = nn.ModuleList(
-                modules=[AFNO(embedding_dim=768, img_size=resolution, patch_size=patch_size) for _ in range(n_fno_layers)]
+                modules=[AFNOLayer(embedding_dim=768, img_size=resolution, patch_size=patch_size) for _ in range(n_fno_layers)]
             )
 
         else:
@@ -717,7 +717,7 @@ class FNO(nn.Module):
         self.embedding_dim = embedding_dim
         self.n_timeframes = n_timeframes
 
-        in_chans_total = n_channels
+        in_chans_total = n_timeframes * n_channels
 
         self.embedding_layer = nn.Sequential(
             nn.Linear(in_features=in_chans_total, out_features=128),
@@ -753,11 +753,11 @@ class FNO(nn.Module):
         assert n_sensor_timeframes == self.n_timeframes
         assert n_channels == self.n_channels
         
-        # Merge B and T
-        x = sensor_values.reshape(batch_size * n_sensor_timeframes, n_channels, in_H, in_W) # (B*T_in, C, H, W)
+        # Merge T and C (TC Merge), keep B unchanged
+        x = sensor_values.flatten(start_dim=1, end_dim=2) # (B, T_in*C, H, W)
         
         # Encoder
-        x = self.embedding_layer(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) # (B*T_in, embedding_dim, H, W)
+        x = self.embedding_layer(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) # (B, embedding_dim, H, W)
         
         # Spectral layers
         for i in range(self.n_fno_layers):
@@ -768,7 +768,7 @@ class FNO(nn.Module):
                 x = F.gelu(x)
         
         # Decoder
-        x = self.decoder(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) # (B*T_in, C, H, W)
+        x = self.decoder(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) # (B, T_in*C, H, W)
         
         # Reshape back to (B, T_in, C, H, W)
         reconstructed_frames = x.reshape(batch_size, n_sensor_timeframes, n_channels, in_H, in_W)
@@ -814,3 +814,182 @@ class FNO(nn.Module):
                     output[b, t_idx] = weight_prev * reconstructed_frames[b, idx-1] + weight_next * reconstructed_frames[b, idx]
         
         return output
+
+class AFNO(nn.Module):
+    def __init__(
+        self,
+        n_channels: int, n_fno_layers: int, embedding_dim: int, 
+        resolution: Tuple[int, int] = (48, 128), n_timeframes: int = 5
+    ):
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_fno_layers = n_fno_layers
+        self.embedding_dim = embedding_dim
+        self.resolution = resolution
+        self.n_timeframes = n_timeframes
+
+        # Determine patch size
+        patch_size = (8, 8) if resolution[0] % 8 == 0 and resolution[1] % 8 == 0 else (resolution[0], resolution[1])
+
+        # We use a large embed_dim for AFNOLayers (like in FNOBranchNet)
+        layer_embed_dim = 768
+        in_chans_total = n_timeframes * n_channels
+        
+        self.patch_embed = PatchEmbed(img_size=resolution, patch_size=patch_size, in_chans=in_chans_total, embed_dim=layer_embed_dim)
+        self.num_patches = self.patch_embed.num_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, layer_embed_dim))
+        
+        self.spectral_conv_layers = nn.ModuleList(
+            modules=[AFNOLayer(embedding_dim=layer_embed_dim, img_size=resolution, patch_size=patch_size) for _ in range(n_fno_layers)]
+        )
+        
+        self.de_patch_embed = DePatchEmbed(img_size=resolution, patch_size=patch_size, out_chans=in_chans_total, embed_dim=layer_embed_dim)
+
+    def forward(
+        self,
+        sensor_timeframes: torch.Tensor,
+        sensor_values: torch.Tensor,
+        fullstate_timeframes: torch.Tensor,
+        out_resolution: Tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        batch_size, n_sensor_timeframes, n_channels, in_H, in_W = sensor_values.shape
+        assert n_sensor_timeframes == self.n_timeframes
+        
+        # Merge T and C (TC Merge)
+        x = sensor_values.flatten(start_dim=1, end_dim=2) # (B, T_in*C, H, W)
+        
+        # Interpolate if input resolution is different from model resolution
+        if (in_H, in_W) != self.resolution:
+            x = F.interpolate(input=x, size=self.resolution, mode='bilinear', align_corners=False)
+            curr_H, curr_W = self.resolution
+        else:
+            curr_H, curr_W = in_H, in_W
+
+        # AFNO forward
+        x = self.patch_embed(x)
+        x = x + self.pos_embed
+        for layer in self.spectral_conv_layers:
+            x = layer(x)
+        x = self.de_patch_embed(x) # (B, T*C, H, W)
+
+        # Reshape back to (B, T, C, H, W)
+        reconstructed_frames = x.reshape(batch_size, n_sensor_timeframes, n_channels, curr_H, curr_W)
+
+        # Interpolate if output resolution is different
+        if out_resolution is not None and out_resolution != (curr_H, curr_W):
+            reconstructed_frames = F.interpolate(
+                input=reconstructed_frames.flatten(0, 1), 
+                size=out_resolution, 
+                mode='bilinear', 
+                align_corners=False
+            ).reshape(batch_size, n_sensor_timeframes, n_channels, *out_resolution)
+            out_H, out_W = out_resolution
+        else:
+            out_H, out_W = curr_H, curr_W
+
+        # Target Frame Interpolation
+        n_fullstate_timeframes = fullstate_timeframes.shape[1]
+        output = torch.zeros(batch_size, n_fullstate_timeframes, n_channels, out_H, out_W, device=sensor_values.device)
+        
+        for b in range(batch_size):
+            times = sensor_timeframes[b]
+            for t_idx in range(n_fullstate_timeframes):
+                target_t = fullstate_timeframes[b, t_idx]
+                idx = torch.searchsorted(times, target_t)
+                if idx == 0:
+                    output[b, t_idx] = reconstructed_frames[b, 0]
+                elif idx == len(times):
+                    output[b, t_idx] = reconstructed_frames[b, -1]
+                else:
+                    t_prev, t_next = times[idx-1], times[idx]
+                    w_next = (target_t - t_prev) / (t_next - t_prev)
+                    output[b, t_idx] = (1.0 - w_next) * reconstructed_frames[b, idx-1] + w_next * reconstructed_frames[b, idx]
+        
+        return output
+
+class Transolver(nn.Module):
+    def __init__(
+        self, 
+        n_channels: int, n_layers: int, n_hidden: int, n_head: int, 
+        resolution: Tuple[int, int], n_timeframes: int = 5,
+        slice_num: int = 32, dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_layers = n_layers
+        self.n_hidden = n_hidden
+        self.n_head = n_head
+        self.resolution = resolution
+        self.H, self.W = resolution
+        self.n_timeframes = n_timeframes
+        self.slice_num = slice_num
+        self.dropout = dropout
+        
+        grid_x = torch.linspace(0, 1, self.H)
+        grid_y = torch.linspace(0, 1, self.W)
+        grid_x, grid_y = torch.meshgrid(grid_x, grid_y, indexing='ij')
+        self.register_buffer('grid', torch.stack([grid_x, grid_y], dim=-1).reshape(1, self.H * self.W, 2))
+
+        in_chans_total = n_timeframes * n_channels
+
+        self.model = TransolverModel(
+            space_dim=2, n_layers=n_layers, n_hidden=n_hidden, n_head=n_head,
+            fun_dim=in_chans_total, out_dim=in_chans_total, slice_num=slice_num,
+            H=self.H, W=self.W, dropout=dropout, unified_pos=False
+        )
+
+    def forward(
+        self,
+        sensor_timeframes: torch.Tensor,
+        sensor_values: torch.Tensor,
+        fullstate_timeframes: torch.Tensor,
+        out_resolution: Tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        batch_size, n_sensor_timeframes, n_channels, in_H, in_W = sensor_values.shape
+        assert n_sensor_timeframes == self.n_timeframes
+        
+        # Merge T and C (TC Merge)
+        v = sensor_values.flatten(start_dim=1, end_dim=2) # (B, T*C, H, W)
+        
+        if (in_H, in_W) != self.resolution:
+            v = F.interpolate(input=v, size=self.resolution, mode='bilinear', align_corners=False)
+            curr_H, curr_W = self.resolution
+        else:
+            curr_H, curr_W = in_H, in_W
+            
+        fx = v.permute(0, 2, 3, 1).reshape(batch_size, curr_H * curr_W, -1) # (B, N, T*C)
+        x_coord = self.grid.repeat(batch_size, 1, 1)
+        
+        output = self.model(x_coord, fx) # (B, N, T*C)
+        output = output.reshape(batch_size, curr_H, curr_W, -1).permute(0, 3, 1, 2) # (B, T*C, H, W)
+        
+        reconstructed_frames = output.reshape(batch_size, n_sensor_timeframes, n_channels, curr_H, curr_W)
+
+        if out_resolution is not None and out_resolution != (curr_H, curr_W):
+            reconstructed_frames = F.interpolate(
+                input=reconstructed_frames.flatten(0, 1), 
+                size=out_resolution, mode='bilinear', align_corners=False
+            ).reshape(batch_size, n_sensor_timeframes, n_channels, *out_resolution)
+            out_H, out_W = out_resolution
+        else:
+            out_H, out_W = curr_H, curr_W
+
+        # Target Frame Interpolation
+        n_fullstate_timeframes = fullstate_timeframes.shape[1]
+        final_output = torch.zeros(batch_size, n_fullstate_timeframes, n_channels, out_H, out_W, device=sensor_values.device)
+        
+        for b in range(batch_size):
+            times = sensor_timeframes[b]
+            for t_idx in range(n_fullstate_timeframes):
+                target_t = fullstate_timeframes[b, t_idx]
+                idx = torch.searchsorted(times, target_t)
+                if idx == 0:
+                    final_output[b, t_idx] = reconstructed_frames[b, 0]
+                elif idx == len(times):
+                    final_output[b, t_idx] = reconstructed_frames[b, -1]
+                else:
+                    t_prev, t_next = times[idx-1], times[idx]
+                    w_next = (target_t - t_prev) / (t_next - t_prev)
+                    final_output[b, t_idx] = (1.0 - w_next) * reconstructed_frames[b, idx-1] + w_next * reconstructed_frames[b, idx]
+        
+        return final_output

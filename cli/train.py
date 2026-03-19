@@ -2,7 +2,7 @@ import argparse
 from typing import List, Dict, Any, Optional
 import yaml
 
-from model import FLRONetFNO, FLRONetUNet, FLRONetMLP, FNO3D, FLRONetTransolver, FNO
+from model import FLRONetFNO, FLRONetUNet, FLRONetMLP, FNO3D, FLRONetTransolver, FNO, AFNO, Transolver
 from cfd.dataset import CFDDataset
 from common.training import CheckpointLoader
 from worker import Trainer
@@ -128,7 +128,7 @@ def main(config: Dict[str, Any]) -> None:
                 resolution=resolution, n_stacked_networks=n_stacked_networks,
             ).cuda()
 
-    elif model_name.lower() == 'flronet-transolver' or model_name.lower() == 'transolver':
+    elif model_name.lower() == 'flronet-transolver':
         # Model
         if from_checkpoint is not None:
             checkpoint_loader = CheckpointLoader(checkpoint_path=from_checkpoint)
@@ -143,6 +143,37 @@ def main(config: Dict[str, Any]) -> None:
                 embedding_dim=embedding_dim, 
                 n_stacked_networks=n_stacked_networks,
                 resolution=resolution,
+                slice_num=slice_num,
+                dropout=trans_dropout
+            ).cuda()
+
+    elif model_name.lower() == 'afno':
+        # Model
+        if from_checkpoint is not None:
+            checkpoint_loader = CheckpointLoader(checkpoint_path=from_checkpoint)
+            net: AFNO = checkpoint_loader.load(scope=globals()).cuda()
+            assert isinstance(net, AFNO)
+        else:
+            net = AFNO(
+                n_channels=n_channels, n_fno_layers=n_fno_layers, 
+                embedding_dim=embedding_dim, resolution=resolution,
+                n_timeframes=len(init_sensor_timeframes),
+            ).cuda()
+
+    elif model_name.lower() == 'transolver':
+        # Model
+        if from_checkpoint is not None:
+            checkpoint_loader = CheckpointLoader(checkpoint_path=from_checkpoint)
+            net: Transolver = checkpoint_loader.load(scope=globals()).cuda()
+            assert isinstance(net, Transolver)
+        else:
+            net = Transolver(
+                n_channels=n_channels, 
+                n_layers=n_trans_layers, 
+                n_hidden=n_trans_hidden, 
+                n_head=n_trans_head,
+                resolution=resolution,
+                n_timeframes=len(init_sensor_timeframes),
                 slice_num=slice_num,
                 dropout=trans_dropout
             ).cuda()
@@ -175,7 +206,7 @@ def main(config: Dict[str, Any]) -> None:
     else:
         raise ValueError(f'Invalid model_name {model_name}')
     
-    if model_name.lower().startswith('flronet') or model_name.lower() == 'transolver':
+    if model_name.lower().startswith('flronet'):
         if freeze_branchnets:
             print('Freezed BranchNets')
             net.freeze_branchnets()
@@ -214,5 +245,3 @@ if __name__ == "__main__":
 
     # Run the main function with the configuration
     main(config)
-
-
