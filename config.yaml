@@ -11,7 +11,7 @@ dataset:
   seed: 1
 
 architecture:
-  momdel_name: 'fno'  # flronet-fno | flronet-unet | flronet-mlp | flronet-transolver | fno3d | fno | afno | transolver
+  momdel_name: 'transolver'  # flronet-fno | flronet-unet | flronet-mlp | flronet-transolver | fno3d | fno | afno | transolver
   # General configs:
   n_channels: 1   # fixed for 1d problems (e.g. 1-channel 48x128)
   embedding_dim: 64
@@ -31,11 +31,11 @@ architecture:
   n_stacked_networks: 2
 
 training:
-  from_checkpoint: null # set to null to train from scratch
+  from_checkpoint: '.checkpoints_trans_0-5_2\transolver10.pt' # set to null to train from scratch
   train_batch_size: 2
   val_batch_size: 2
   learning_rate: 1e-4
-  n_epochs: 10
+  n_epochs: 100
   patience: 5
   tolerance: 0.
   save_frequency: 1
@@ -46,7 +46,7 @@ training:
 
 evaluate:
   # from_checkpoint: 'best_fno3d/fno3d9.pt'
-  from_checkpoint: '.checkpoints\flronetfno1.pt'
+  from_checkpoint: '.checkpoints\flronettransolver88.pt'
   # from_checkpoint: 'best_flronetmlp/flronetmlp12.pt'
   # from_checkpoint: 'best_flronetunet/flronetunet16.pt'
   n_dropout_sensors: 0

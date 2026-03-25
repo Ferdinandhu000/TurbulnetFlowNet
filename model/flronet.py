@@ -535,8 +535,10 @@ class TrunkNet(nn.Module):
         for i in range(self.n_outputs):
             mlp: nn.Module = self.mlps[i]
             output: torch.Tensor = torch.einsum('nse,nfe->nsf', mlp(sensor_time_embeddings), mlp(fullstate_time_embeddings))
+            print(output)
             assert output.shape == (batch_size, n_sensor_timeframes, n_fullstate_timeframes)
             outputs.append(output)
+            print(outputs)
         return outputs
 
 
